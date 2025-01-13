@@ -361,4 +361,4 @@ def run_flask_app():
 if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask_app, daemon=True)
     flask_thread.start()
-    bot.run('MTMyODM3MTgyMTgwMzczMzA5NA.GwD0mW.3yZJl2xgY9wgdOdZHL-gbMy-c4cWB3UGtbemek')
+    bot.run('DISCORD_BOT_TOKEN')
