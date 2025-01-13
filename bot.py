@@ -352,7 +352,7 @@ def remove_song():
     return redirect(url_for("index"))
 
 def run_flask_app():
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8008)
 
 ##################################################
 #       RUN THE BOT + FLASK (CONCURRENT)
