@@ -362,3 +362,4 @@ if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask_app, daemon=True)
     flask_thread.start()
     bot.run('DISCORD_BOT_TOKEN')
+    # Removed
