@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  discord-bot:
+    container_name: discord_bot
+    # Build from local Dockerfile (in the same directory).
+    build: .
+    # If you need to mount local files for dev, you can do something like:
+    # volumes:
+    #   - .:/app
+    environment:
+      # Provide your Discord bot token
+      # You can override this in Portainer under "Environment Variables"
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-REPLACE_ME}
+    ports:
+      # Expose the Flask web UI on your host's port 8080
+      - '8008:8008'
+    # If you want the container to restart automatically in case of errors:
+    restart: unless-stopped
