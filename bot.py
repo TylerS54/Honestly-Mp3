@@ -5,10 +5,9 @@ from discord.ext import commands
 
 # Voice support
 import yt_dlp
-from discord import FFmpegPCMAudio
 
-# Web server
-from flask import Flask, request, render_template_string, redirect, url_for
+# Minimal Flask server
+from flask import Flask, request, jsonify
 import threading
 
 ##################################################
@@ -18,7 +17,7 @@ import threading
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "REPLACE_ME")
 
 intents = discord.Intents.default()
-intents.message_content = True  # needed to read messages in guild
+intents.message_content = True  # needed to read text messages
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # In-memory queue
@@ -33,7 +32,7 @@ current_song_info = {
 }
 
 FFMPEG_OPTIONS = {
-    'before_options': '-nostdin',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn'
 }
 
@@ -64,10 +63,9 @@ async def on_ready():
 ##################################################
 
 @bot.command(name="play")
-async def play(ctx, url: str):
+async def play_cmd(ctx, url: str):
     """
-    Play the given YouTube URL or add it to the queue.
-    If the bot is not in a voice channel, join the user's channel automatically.
+    !play <URL or search term>
     """
     # If bot is not in a VC, join the user's channel
     if not ctx.voice_client or not ctx.voice_client.is_connected():
@@ -107,17 +105,17 @@ async def play(ctx, url: str):
     )
     await ctx.send(embed=embed)
 
-    # If not playing anything, handle immediately
+    # If nothing is currently playing, start playback immediately
     if not ctx.voice_client.is_playing():
         await handle_queue(ctx)
 
 @bot.command(name="skip")
-async def skip(ctx):
+async def skip_cmd(ctx):
     """
-    Skip the current song and move on to the next.
+    !skip - Skip the current song
     """
     if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.stop()  # This triggers _after_song and goes to the next in queue
+        ctx.voice_client.stop()  # triggers _after_song -> handle_queue
         embed = discord.Embed(
             title="Skipping",
             description="Skipping current song.",
@@ -133,9 +131,9 @@ async def skip(ctx):
         await ctx.send(embed=embed)
 
 @bot.command(name="queue")
-async def show_queue(ctx):
+async def show_queue_cmd(ctx):
     """
-    Shows the current queue of songs.
+    !queue - Show the current queue of songs
     """
     if not song_queue:
         embed = discord.Embed(
@@ -158,9 +156,9 @@ async def show_queue(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name="leave")
-async def leave(ctx):
+async def leave_cmd(ctx):
     """
-    Leaves the voice channel.
+    !leave - Bot leaves the voice channel
     """
     if ctx.voice_client:
         await ctx.voice_client.disconnect()
@@ -194,7 +192,7 @@ async def handle_queue(ctx):
     current_song_info["title"] = next_song["title"]
     current_song_info["requested_by"] = next_song["requested_by"]
 
-    source = FFmpegPCMAudio(next_song["url"], **FFMPEG_OPTIONS)
+    source = FFmpegOpusAudio(next_song["url"], **FFMPEG_OPTIONS)
     ctx.voice_client.play(
         source,
         after=lambda e: asyncio.run_coroutine_threadsafe(_after_song(ctx), bot.loop)
@@ -216,7 +214,7 @@ async def _after_song(ctx):
     current_song_info["title"] = None
     current_song_info["requested_by"] = None
 
-    # If there are still songs in queue, play next
+    # If there are still songs in the queue, play next
     if song_queue:
         await handle_queue(ctx)
 
@@ -226,130 +224,90 @@ async def _after_song(ctx):
 
 app = Flask(__name__)
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Discord Music Bot Queue</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        h1, h2 { margin-bottom: 0.5em; }
-        ul { list-style: none; padding: 0; }
-        li { margin: 0.2em 0; }
-        .current-song {
-            margin: 1em 0;
-            padding: 1em;
-            background-color: #f3f3f3;
-        }
-        .controls form {
-            display: inline-block;
-            margin-left: 5px;
-        }
-        .controls button {
-            padding: 4px 8px;
-            margin: 2px;
-        }
-    </style>
-</head>
-<body>
-    <h1>Discord Music Bot</h1>
-    {% if current.title %}
-      <div class="current-song">
-        <h2>Currently Playing</h2>
-        <p><strong>Title:</strong> {{ current.title }}</p>
-        <p><strong>Requested by:</strong> {{ current.requested_by }}</p>
-        <div class="controls">
-          <form action="{{ url_for('skip_song') }}" method="POST">
-            <button type="submit">Skip</button>
-          </form>
-        </div>
-      </div>
-    {% else %}
-      <p>No song is currently playing.</p>
-    {% endif %}
-    
-    <h2>Upcoming Queue</h2>
-    {% if queue %}
-      <ul>
-        {% for song in queue %}
-          <li>
-            <strong>{{ song.title }}</strong> (requested by {{ song.requested_by }})
-            <div class="controls">
-              <!-- Move Up -->
-              {% if loop.index0 > 0 %}
-                <form action="{{ url_for('move_song') }}" method="POST" style="display:inline;">
-                  <input type="hidden" name="index" value="{{ loop.index0 }}">
-                  <input type="hidden" name="direction" value="up">
-                  <button type="submit">Up</button>
-                </form>
-              {% endif %}
-              
-              <!-- Move Down -->
-              {% if loop.index0 < (queue|length - 1) %}
-                <form action="{{ url_for('move_song') }}" method="POST" style="display:inline;">
-                  <input type="hidden" name="index" value="{{ loop.index0 }}">
-                  <input type="hidden" name="direction" value="down">
-                  <button type="submit">Down</button>
-                </form>
-              {% endif %}
-              
-              <!-- Remove from queue -->
-              <form action="{{ url_for('remove_song') }}" method="POST" style="display:inline;">
-                <input type="hidden" name="index" value="{{ loop.index0 }}">
-                <button type="submit">Remove</button>
-              </form>
-            </div>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p>The queue is empty.</p>
-    {% endif %}
-</body>
-</html>
-"""
+@app.route("/play", methods=["POST"])
+def play_song_webhook():
+    """
+    Minimal endpoint to accept {"song": "..."} JSON and enqueue it.
+    This replicates the logic of !play without needing a Discord text command.
+    """
+    data = request.get_json(silent=True) or {}
+    song = data.get("song")
+    if not song:
+        return jsonify({"error": "No 'song' provided"}), 400
 
-@app.route("/")
-def index():
-    return render_template_string(
-        HTML_TEMPLATE,
-        current=current_song_info,
-        queue=song_queue
-    )
+    # We'll schedule an async function on the bot loop that:
+    # 1) Joins a voice channel if not already in one.
+    # 2) Enqueues the song.
+    # 3) Plays if nothing else is playing.
+    # Because we don't have a real 'ctx' from chat, we'll
+    # create a "pseudo-context" or pick the first available voice channel.
+    future = asyncio.run_coroutine_threadsafe(_web_enqueued_play(song), bot.loop)
+    # We won't wait for it to finish; just return success.
+    return jsonify({"status": "ok", "message": f"Enqueued: {song}"}), 200
 
-@app.route("/skip", methods=["POST"])
-def skip_song():
-    # Skip current song
-    coro = skip_current_song()
-    asyncio.run_coroutine_threadsafe(coro, bot.loop)
-    return redirect(url_for("index"))
+TEXT_CHANNEL_ID = 712276849006477362
 
-async def skip_current_song():
-    # Attempt to skip in the first connected voice client
+TEXT_CHANNEL_ID = 712276849006477362
+
+async def _web_enqueued_play(song_url: str):
+    # 1) Attempt to join a voice channel if the bot isn't in one
+    voice_client = None
     for vc in bot.voice_clients:
-        if vc.is_playing():
-            vc.stop()
-    return
+        if vc.guild:
+            voice_client = vc
+            break
 
-@app.route("/move", methods=["POST"])
-def move_song():
-    index = int(request.form.get("index", -1))
-    direction = request.form.get("direction")
+    if not voice_client:
+        # Try to find the first guild where the bot is a member
+        guilds = bot.guilds
+        if guilds:
+            guild = guilds[0]
+            voice_channels = [ch for ch in guild.channels if ch.type == discord.ChannelType.voice]
+            if voice_channels:
+                voice_client = await voice_channels[0].connect()
 
-    if 0 <= index < len(song_queue):
-        if direction == "up" and index > 0:
-            song_queue[index - 1], song_queue[index] = song_queue[index], song_queue[index - 1]
-        elif direction == "down" and index < len(song_queue) - 1:
-            song_queue[index + 1], song_queue[index] = song_queue[index], song_queue[index + 1]
+    # 2) Extract info & enqueue
+    try:
+        info = yt_dlp_extract_info(song_url)
+    except Exception as e:
+        print(f"[ERROR] Could not extract info from {song_url}. Exception: {e}")
+        return
 
-    return redirect(url_for("index"))
+    requested_by = "Siri"
+    song_queue.append({
+        "url": info["url"],
+        "title": info["title"],
+        "requested_by": requested_by
+    })
 
-@app.route("/remove", methods=["POST"])
-def remove_song():
-    index = int(request.form.get("index", -1))
-    if 0 <= index < len(song_queue):
-        song_queue.pop(index)
-    return redirect(url_for("index"))
+    # 2a) POST A MESSAGE to the text channel:
+    channel = bot.get_channel(TEXT_CHANNEL_ID)
+    if channel is not None:
+        await channel.send(
+            f"*Added to Queue*: {info['title']}\n"
+            f"Requested by: {requested_by}"
+        )
+    else:
+        print(f"[WARNING] Could not find text channel {TEXT_CHANNEL_ID}")
+
+    # 3) If not currently playing, start playback
+    if voice_client and not voice_client.is_playing():
+        # Create a "dummy context"
+        class DummyCtx:
+            def __init__(self, vc):
+                self.voice_client = vc
+                self.guild = vc.guild
+
+            async def send(self, *args, **kwargs):
+                # If you want to post updates to the same text channel, you could do so here:
+                if channel is not None:
+                    await channel.send(*args, **kwargs)
+                else:
+                    print("[INFO] BOT MSG (no text channel found):", args, kwargs)
+
+        dummy_ctx = DummyCtx(voice_client)
+        await handle_queue(dummy_ctx)
+
 
 def run_flask_app():
     app.run(host="0.0.0.0", port=8008)
@@ -359,7 +317,9 @@ def run_flask_app():
 ##################################################
 
 if __name__ == "__main__":
+    # Start Flask in a separate thread
     flask_thread = threading.Thread(target=run_flask_app, daemon=True)
     flask_thread.start()
+
+    # Start the Discord bot (blocking call)
     bot.run(DISCORD_BOT_TOKEN)
-    # Removed
