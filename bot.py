@@ -192,7 +192,7 @@ async def handle_queue(ctx):
     current_song_info["title"] = next_song["title"]
     current_song_info["requested_by"] = next_song["requested_by"]
 
-    source = FFmpegOpusAudio(next_song["url"], **FFMPEG_OPTIONS)
+    source = discord.FFmpegOpusAudio(next_song["url"], **FFMPEG_OPTIONS)
     ctx.voice_client.play(
         source,
         after=lambda e: asyncio.run_coroutine_threadsafe(_after_song(ctx), bot.loop)
