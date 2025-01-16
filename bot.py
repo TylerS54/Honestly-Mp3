@@ -1,9 +1,9 @@
 import os
+import re
 import asyncio
 import discord
 from discord.ext import commands
 
-# Voice support
 import yt_dlp
 
 # Minimal Flask server
@@ -31,16 +31,40 @@ current_song_info = {
     "requested_by": None,
 }
 
+# We'll store user IDs in a list for easy iteration:
+SPECIAL_USER_IDS = [
+    139880416726220801,
+    109138375927148544
+]
+
 FFMPEG_OPTIONS = {
+    # reconnect logic; helpful for streams
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn'
 }
 
-def yt_dlp_extract_info(url: str):
+##################################################
+#          YT_DLP SEARCH OR URL HELPER
+##################################################
+
+def is_url(string: str) -> bool:
+    """
+    Quick check if the string looks like an http(s) URL.
+    """
+    pattern = r'^(?:http|ftp)s?://'  # matches http://, https://, ftp://, etc.
+    return re.match(pattern, string, re.IGNORECASE) is not None
+
+def yt_dlp_extract_info(query_or_url: str):
     """
     Uses yt_dlp to extract the best audio source.
-    Returns a dict containing the 'url' and 'title' keys if successful.
+    - If query_or_url is a valid URL, use it directly.
+    - Otherwise, treat it as a YT search term (ytsearch1:<query>).
+    Returns a dict containing 'url' and 'title'.
     """
+    # If it's NOT an actual URL, perform a YouTube search
+    if not is_url(query_or_url):
+        query_or_url = f"ytsearch1:{query_or_url}"
+
     ytdlp_options = {
         'format': 'bestaudio/best',
         'quiet': True,
@@ -48,24 +72,32 @@ def yt_dlp_extract_info(url: str):
         'ignoreerrors': True,
     }
     with yt_dlp.YoutubeDL(ytdlp_options) as ydl:
-        info = ydl.extract_info(url, download=False)
+        info = ydl.extract_info(query_or_url, download=False)
+        # If it's a search or playlist, info might contain 'entries'
+        if 'entries' in info:
+            info = (info['entries'] or [None])[0]
+        if not info:
+            raise ValueError("No video found for this query.")
+
     return {
         'title': info.get('title', 'Unknown Title'),
         'url': info['url'],
     }
 
+##################################################
+#               BOT EVENTS & COMMANDS
+##################################################
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
-##################################################
-#               BOT COMMANDS
-##################################################
-
 @bot.command(name="play")
-async def play_cmd(ctx, url: str):
+async def play_cmd(ctx, *, query: str):
     """
     !play <URL or search term>
+
+    Using *query: str to capture full text (in case user typed multiple words).
     """
     # If bot is not in a VC, join the user's channel
     if not ctx.voice_client or not ctx.voice_client.is_connected():
@@ -80,13 +112,13 @@ async def play_cmd(ctx, url: str):
             await ctx.send(embed=embed)
             return
     
-    # Extract info
+    # Extract info (search or URL)
     try:
-        info = yt_dlp_extract_info(url)
+        info = yt_dlp_extract_info(query)
     except Exception as e:
         embed = discord.Embed(
             title="Error",
-            description=f"Could not extract info from the URL. Details: {e}",
+            description=f"Could not extract info from the input. Details: {e}",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -100,7 +132,7 @@ async def play_cmd(ctx, url: str):
     
     embed = discord.Embed(
         title="Added to Queue",
-        description=f"**[{info['title']}]({url})**\nRequested by **{ctx.author.name}**",
+        description=f"**[{info['title']}]({query})**\nRequested by **{ctx.author.name}**",
         color=discord.Color.blue()
     )
     await ctx.send(embed=embed)
@@ -192,6 +224,7 @@ async def handle_queue(ctx):
     current_song_info["title"] = next_song["title"]
     current_song_info["requested_by"] = next_song["requested_by"]
 
+    # We'll use FFmpegOpusAudio to play
     source = discord.FFmpegOpusAudio(next_song["url"], **FFMPEG_OPTIONS)
     ctx.voice_client.play(
         source,
@@ -236,35 +269,50 @@ def play_song_webhook():
         return jsonify({"error": "No 'song' provided"}), 400
 
     # We'll schedule an async function on the bot loop that:
-    # 1) Joins a voice channel if not already in one.
+    # 1) Joins a voice channel if not already in one (looking for special user IDs).
     # 2) Enqueues the song.
     # 3) Plays if nothing else is playing.
-    # Because we don't have a real 'ctx' from chat, we'll
-    # create a "pseudo-context" or pick the first available voice channel.
     future = asyncio.run_coroutine_threadsafe(_web_enqueued_play(song), bot.loop)
-    # We won't wait for it to finish; just return success.
-    return jsonify({"status": "ok", "message": f"Enqueued: {song}"}), 200
 
-TEXT_CHANNEL_ID = 712276849006477362
+    return jsonify({"status": "ok", "message": f"Enqueued: {song}"}), 200
 
 TEXT_CHANNEL_ID = 712276849006477362
 
 async def _web_enqueued_play(song_url: str):
     # 1) Attempt to join a voice channel if the bot isn't in one
+    #    Specifically, look for the 2 user IDs in any of the bot's guilds.
     voice_client = None
+
+    # Check if we're already in a voice channel
     for vc in bot.voice_clients:
-        if vc.guild:
+        if vc.guild and vc.is_connected():
             voice_client = vc
             break
 
+    # If not already in a channel, look for a special user's channel
     if not voice_client:
-        # Try to find the first guild where the bot is a member
-        guilds = bot.guilds
-        if guilds:
-            guild = guilds[0]
-            voice_channels = [ch for ch in guild.channels if ch.type == discord.ChannelType.voice]
-            if voice_channels:
-                voice_client = await voice_channels[0].connect()
+        # Try each guild in which the bot is a member
+        found_channel = False
+        for guild in bot.guilds:
+            if found_channel:
+                break
+
+            # Check if user1 or user2 is in a voice channel
+            for user_id in SPECIAL_USER_IDS:
+                member = guild.get_member(user_id)
+                if member and member.voice and member.voice.channel:
+                    # Found a user in a voice channel; join that channel
+                    voice_client = await member.voice.channel.connect()
+                    found_channel = True
+                    break
+
+        # If we still don't have a voice_client, fallback to first voice channel in first guild
+        if not found_channel:
+            if bot.guilds:
+                guild = bot.guilds[0]
+                voice_channels = [ch for ch in guild.channels if ch.type == discord.ChannelType.voice]
+                if voice_channels:
+                    voice_client = await voice_channels[0].connect()
 
     # 2) Extract info & enqueue
     try:
@@ -273,7 +321,7 @@ async def _web_enqueued_play(song_url: str):
         print(f"[ERROR] Could not extract info from {song_url}. Exception: {e}")
         return
 
-    requested_by = "Siri"
+    requested_by = "Webhook"
     song_queue.append({
         "url": info["url"],
         "title": info["title"],
@@ -284,7 +332,7 @@ async def _web_enqueued_play(song_url: str):
     channel = bot.get_channel(TEXT_CHANNEL_ID)
     if channel is not None:
         await channel.send(
-            f"*Added to Queue*: {info['title']}\n"
+            f"**Added to Queue**: {info['title']}\n"
             f"Requested by: {requested_by}"
         )
     else:
@@ -299,7 +347,7 @@ async def _web_enqueued_play(song_url: str):
                 self.guild = vc.guild
 
             async def send(self, *args, **kwargs):
-                # If you want to post updates to the same text channel, you could do so here:
+                # If we want to post updates to the same text channel, do so:
                 if channel is not None:
                     await channel.send(*args, **kwargs)
                 else:
@@ -307,7 +355,6 @@ async def _web_enqueued_play(song_url: str):
 
         dummy_ctx = DummyCtx(voice_client)
         await handle_queue(dummy_ctx)
-
 
 def run_flask_app():
     app.run(host="0.0.0.0", port=8008)
